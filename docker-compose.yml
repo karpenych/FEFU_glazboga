@@ -1,0 +1,142 @@
+services:
+
+  #
+  # INFRA FOR GLAZBOGA
+  #
+
+  mq:
+    image: nats:latest
+    container_name: mq
+    command: "--http_port 8222"
+    ports:
+      - 4222:4222
+      - 8222:8222
+
+  db:
+    image: postgres:17-alpine
+    container_name: db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - 5432:5432
+    volumes:
+      - glazboga_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  #
+  # SERVICES FOR GLAZBOGA
+  #
+
+  consumer:
+    build:
+      context: .
+      dockerfile: ./consumer/Dockerfile
+    environment:
+      - LOG_LVL=info
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=db
+      - POSTGRES_DATABASE=${POSTGRES_DB}
+      - NATS_SERVER=mq:4222
+      - NATS_SUBJECT=${NUTS_SUBJECT}
+    depends_on:
+      mq:
+        condition: service_started
+      db:
+        condition: service_healthy
+
+  glazboga:
+    build:
+      context: .
+      dockerfile: ./glazboga/Dockerfile
+    environment:
+      - LOCATIONS_NUM=2
+      - TASKS_NUM=1
+      - MIN_TASK_SLEEP_TIME=10.0
+      - MAX_TASK_SLEEP_TIME=15.0
+      - LOG_LVL=info
+      - NATS_SERVER=mq:4222
+      - NATS_SUBJECT=${NUTS_SUBJECT}
+    depends_on:
+      - consumer
+
+  #
+  # REDASH
+  #
+
+  redash_setup:
+    image: redash/redash:latest
+    command: create_db
+    environment:
+      REDASH_DATABASE_URL: postgresql://postgres:${REDASH_DB_PASSWORD}@redash_postgres:5432/redash
+    depends_on:
+      - redash_postgres
+    restart: on-failure
+
+  redash_server:
+    image: redash/redash:latest
+    command: server
+    ports:
+      - 5000:5000
+    environment:
+      REDASH_DATABASE_URL: postgresql://postgres:${REDASH_DB_PASSWORD}@redash_postgres:5432/redash
+      REDASH_REDIS_URL: redis://redash_redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+    depends_on:
+      - redash_postgres
+      - redash_redis
+      - redash_setup
+    restart: always
+
+  redash_scheduler:
+    image: redash/redash:latest
+    command: scheduler
+    environment:
+      REDASH_DATABASE_URL: postgresql://postgres:${REDASH_DB_PASSWORD}@redash_postgres:5432/redash
+      REDASH_REDIS_URL: redis://redash_redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+    depends_on:
+      - redash_server
+    restart: always
+
+  redash_worker:
+    image: redash/redash:latest
+    command: worker
+    environment:
+      REDASH_DATABASE_URL: postgresql://postgres:${REDASH_DB_PASSWORD}@redash_postgres:5432/redash
+      REDASH_REDIS_URL: redis://redash_redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+    depends_on:
+      - redash_server
+    restart: always
+
+  redash_redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redash_redis_data:/data
+
+  redash_postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: redash
+      POSTGRES_PASSWORD: ${REDASH_DB_PASSWORD}
+    volumes:
+      - redash_postgres_data:/var/lib/postgresql/data
+
+
+volumes:
+  glazboga_postgres_data:
+  redash_postgres_data:
+  redash_redis_data:
